@@ -1,11 +1,4 @@
-import cuquantum, sklearn, qiskit, qiskit_algorithms
-print(f"Qiskit: {qiskit.__version__}")
-print(f"Qiskit ML: {qiskit_algorithms.__version__}")
-print(f"cuQuantum: {cuquantum.__version__}")
-print(f"skLearn: {sklearn.__version__}")
-
 import numpy as np
-import cupy as cp
 import pandas as pd
 import time
 import matplotlib.pyplot as plt
@@ -17,9 +10,13 @@ from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler, MinMaxScaler
 from sklearn.datasets import load_digits, fetch_openml
 from sklearn.model_selection import GridSearchCV
-from qiskit import QuantumCircuit
+from qiskit.circuit.library import PauliFeatureMap, ZFeatureMap, ZZFeatureMap
+from qiskit_machine_learning.kernels import QuantumKernel
+from qiskit import QuantumCircuit, transpile, Aer
 from qiskit.circuit import ParameterVector
 from cuquantum import *
+import time
+import cupy as cp
 from cupy.cuda import nccl
 from cupy.cuda.runtime import getDeviceCount
 from mpi4py import MPI
@@ -31,7 +28,10 @@ device_id = rank % getDeviceCount()
 # Note that all NCCL operations must be performed in the correct device context.
 cp.cuda.Device(device_id).use()
 
-## Set up the NCCL communicator.
+name = MPI.Get_processor_name()
+print("MPI rank %d / %d on %s." % (rank, size, name))
+
+# Set up the NCCL communicator.
 #nccl_id = nccl.get_unique_id() if rank == root else None
 #nccl_id = comm_mpi.bcast(nccl_id, root)
 #comm_nccl = nccl.NcclCommunicator(size, nccl_id, rank)
@@ -42,7 +42,7 @@ Y = mnist.target.to_numpy().astype(int)
 class_list = [7,9]
 c01 = np.where((Y == class_list[0])|(Y == class_list[1]))
 X,Y = X[c01],Y[c01]
-MAX=100
+MAX=2000
 data_train, label_train = X[:MAX],Y[:MAX]
 X_train, X_val, Y_train, Y_val = train_test_split(data_train, label_train, test_size = 0.2, random_state=255)
 
@@ -74,6 +74,26 @@ def make_bsp(n_dim):
     for q in range(n_dim):
         bsp_qc.rz(param.params[q],[q])
     return bsp_qc
+def new_op(n_dim,oper,y_t,x_t):
+    n_zg, n_zy_g = [], []
+    for d1 in y_t:
+        z_g  = np.array([[np.exp(-1j*0.5*d1),0],[0,np.exp(1j*0.5*d1)]])
+        n_zg.append(z_g)
+        y_g  = np.array([[np.cos(d1/2),-np.sin(d1/2)],[np.sin(d1/2),np.cos(d1/2)]])
+        n_zy_g.append(z_g)
+        n_zy_g.append(y_g)
+    oper[n_dim*2:n_dim*4] = cp.array(n_zy_g)
+    oper[n_dim*5-1:n_dim*6-1] = cp.array(n_zg)
+    n_zgd, n_zy_gd = [], []
+    for d2 in x_t[::-1]:       
+        z_gd  = np.array([[np.exp(1j*0.5*d2),0],[0,np.exp(-1j*0.5*d2)]])
+        n_zgd.append(z_gd)  
+        y_gd  = np.array([[np.cos(d2/2),np.sin(d2/2)],[-np.sin(d2/2),np.cos(d2/2)]])
+        n_zy_gd.append(y_gd)
+        n_zy_gd.append(z_gd)
+    oper[n_dim*6-1:n_dim*7-1] = cp.array(n_zgd)
+    oper[n_dim*8-2:n_dim*10-2] = cp.array(n_zy_gd)
+    return oper
 def kernel_matrix_tnsm(y_t, x_t, opers, indices_list, network, mode=None):
     kernel_matrix = np.zeros((len(y_t),len(x_t)))
     i = -1
@@ -97,17 +117,20 @@ def operand_to_amp(opers, indices_list, network):
             amp_tmp.append(amp_tn)
     return amp_tmp
 
-def run_tnsm(n_dim, nb1, nb2):
-    a = str(0).zfill(n_dim)
-    data_train, data_val  = data_prepare(n_dim, X_train, X_val, nb1, nb2)
+
+def run_tnsm(data_train, n_dim):
+    ##data_train, data_val  = data_prepare(n_dim, X_train, X_val, nb1, nb2)
+    bsp_qc = make_bsp(n_dim)
+    bsp_kernel_tnsm = QuantumKernel(feature_map=bsp_qc)   
     indices_list_t = list(combinations(range(1, len(data_train) + 1), 2))
 
-    ### TN expression from the first element
-    psix=make_bsp(n_dim)
-    psiy=psix.inverse()
-    exp_t = -1
-    
-    ### MPI data decomposition...
+    t0 = time.time()      
+    circuit = bsp_kernel_tnsm.construct_circuit(data_train[0], data_train[0],False)
+    converter = CircuitToEinsum(circuit, dtype='complex128', backend='cupy')
+    a = str(0).zfill(n_dim)
+    exp, oper = converter.amplitude(a)     
+    exp_t = round((time.time()-t0),3)
+
     num_data = len(indices_list_t)
     chunk, extra = num_data // size, num_data % size
     data_begin = rank * chunk + min(rank, extra)
@@ -115,18 +138,14 @@ def run_tnsm(n_dim, nb1, nb2):
     data_index = range(data_begin,data_end)
     indices_list_rank = indices_list_t[data_begin:data_end]
     # print(f"Process {rank} is processing data range: {data_index}.",num_data,len(indices_list_rank))
-
-    ### Buing operators for each kernel element
+    
     t0 = time.time() 
     oper_train = []
     for i1, i2 in indices_list_rank:
-        cir = psix.assign_parameters(data_train[i1-1]).compose(psiy.assign_parameters(data_train[i2-1]))
-        con = CircuitToEinsum(cir, dtype='complex128', backend='cupy')
-        exp, oper = con.amplitude( a )
-        oper_train.append(oper)
+        n_op = new_op(n_dim,oper,data_train[i1-1],data_train[i2-1])
+        oper_train.append(n_op)        
     oper_t = round((time.time()-t0),3)
 
-    ### Find optimal contraction path
     t0 = time.time()     
     oper = oper_train[0]
     options = NetworkOptions(blocking="auto",device_id=device_id)
@@ -135,24 +154,31 @@ def run_tnsm(n_dim, nb1, nb2):
     network.autotune(iterations=20)
     path_t = round((time.time()-t0),3)
 
-    ### Calculte kernels locally
-    t0 = time.time()     
+    t0 = time.time()
     amp_list = operand_to_amp(oper_train, indices_list_rank, network)
     amp_list = cp.array(amp_list)
 
-    ### Reduce
-    stream_ptr = cp.cuda.get_current_stream().ptr
+    #t0 = time.time() 
+    #stream_ptr = cp.cuda.get_current_stream().ptr
     # comm_nccl.reduce(amp_list.ptr, amp_list.ptr, amp_list.size, nccl.NCCL_FLOAT64, nccl.NCCL_SUM, root, stream_ptr)
     # data = comm_nccl.allGather(amp_list, amp_list, amp_list.size, nccl.NCCL_FLOAT64, stream_ptr)
     data = comm_mpi.gather(amp_list, root=0)
     tnsm_kernel_t = round((time.time()-t0),3)
     if rank == root:
-        print(n_dim,exp_t,oper_t,path_t,tnsm_kernel_t,len(amp_list),len(data))
+        print(n_dim, len(data_train), path_t, oper_t, tnsm_kernel_t, f"{len(amp_list)} / {num_data}", exp_t)
+        #print(data)
 
-run_tnsm(2,40,1)
+if 1:
+ for ndim in [8,16,32,64,128]:
+  for d in [10,20,40,80,200,400,800,1000]:
+    dtrain, _ = data_prepare(ndim, X_train, X_val, d, 1)
+    run_tnsm(dtrain, ndim)
+
+
+#run_tnsm(4,10,2)
 # run_tnsm(128,1000,1)
-#for d in [40,60,80,100,200,400,600,800,1000]:
-#    run_tnsm(128,d,1)
+#for d in [40,60,80,200]: ##,200,400,600,800,1000]:
+#    run_tnsm(8,d,1)
 # run_tnsm(128,500,1)
 # for q in range(2,34):
 #     run_tnsm(q,2,1)
