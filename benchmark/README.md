@@ -6,12 +6,12 @@ ml openmpi/5.0.6
 ml python/3.12.8
 ```
 
-Based on that, an virtual env for running cuQuantum/24 can be loaded by
+Based on that, a ready-to-use virtual env for running cuQuantum/24 can be loaded by
 ```
 source /work/p00lcy01/venv/cuq24_py312/bin/activate
 ```
 
-You can build a new env by:
+Instead, if you want to build your venv, just follow this:
 ```
 ml purge
 ml python/3.12.8
