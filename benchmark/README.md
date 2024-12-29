@@ -1,3 +1,37 @@
+TOC
+- [Quick start on Twnia-2](#quick-start-on-taiwan-2)
+- [Quick start on H100](#quick-start-on-h100-cluster)
+- [Venv detail on H100](#env-on-h100-cluster)
+
+
+
+## Quick start on Taiwan-2
+We use the system bundled NVHPC 24.11 and self-built Python 3.12.8. To use them, first load my module path 
+```
+module use /opt/ohpc/pkg/kagra/modulefiles     # this line can be added in your ~/.bashrc
+ml nvhpc-24.11_hpcx-2.20_cuda-12.6
+ml python/3.12.8
+```
+
+Based on that, a ready-to-use virtual env for running cuQuantum/24 can be loaded by
+```
+source /opt/ohpc/pkg/kagra/ENV/cuquantum24/bin/activate
+```
+
+Instead, if you want to build your venv, just follow this:
+```
+ml purge
+ml nvhpc-24.11_hpcx-2.20_cuda-12.6
+ml python/3.12.8
+
+ENV=<Your venv path>
+python3 -m venv ${ENV}
+
+pip install mpi4py
+pip install seaborn pandas scikit-learn
+pip install cuquantum-python-cu12 qiskit_aer-gpu cupy-cuda12x qiskit qiskit_algorithms qiskit_machine_learning
+```
+
 ## Quick start on H100 cluster
 I built OpenMPI based on prebuilt packages in NVHPC (UCX, UCC, Hcoll, NCCL, CUDA SDK, ...) and Python 3.12 by gcc. To use them, first load the module path 
 ```
