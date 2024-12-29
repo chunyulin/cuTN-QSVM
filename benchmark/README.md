@@ -9,7 +9,7 @@ TOC
 We use the system bundled NVHPC 24.11 and self-built Python 3.12.8. To use them, first load my module path 
 ```
 module use /opt/ohpc/pkg/kagra/modulefiles     # this line can be added in your ~/.bashrc
-ml nvhpc-24.11_hpcx-2.20_cuda-12.6
+ml sys/nvhpc-hpcx
 ml python/3.12.8
 ```
 
