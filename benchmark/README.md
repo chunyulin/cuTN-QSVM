@@ -21,7 +21,7 @@ source /opt/ohpc/pkg/kagra/ENV/cuquantum24/bin/activate
 Instead, if you want to build your venv, just follow this:
 ```
 ml purge
-ml nvhpc-24.11_hpcx-2.20_cuda-12.6
+ml sys/nvhpc-hpcx
 ml python/3.12.8
 
 ENV=<Your venv path>
